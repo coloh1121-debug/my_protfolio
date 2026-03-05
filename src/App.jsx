@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { CONTENT_OUTPUT_REMOTE_MEDIA } from "./content-output-remote.js";
 
 const PROFILE = {
   name: "严欢 / Ryan",
@@ -138,14 +139,36 @@ const FLOW_WORK_FOLDERS = {
   assetDeliveryPath: "assets/flowcharts-playbooks/asset-delivery-path/",
 };
 
-function getMixedMediaAssets(modules) {
-  const entries = Object.entries(modules)
+function getMixedMediaAssets(modules, remoteItems = []) {
+  const remoteEntries = (remoteItems || [])
+    .filter((item) => item && typeof item.src === "string" && item.src.trim())
+    .map((item, index) => {
+      const src = item.src.trim();
+      const inferredType =
+        item.type === "video" || item.type === "image"
+          ? item.type
+          : /\.(mp4|webm|mov|m4v)(\?|#|$)/i.test(src)
+            ? "video"
+            : "image";
+      const fileName = src.split("/").pop()?.split("?")[0] || `remote-item-${index + 1}`;
+
+      return {
+        src,
+        type: inferredType,
+        path: item.path?.trim() || `remote/${fileName}`,
+      };
+    });
+
+  const localEntries = Object.entries(modules)
     .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
     .map(([path, src]) => ({
       src,
       type: /\.(mp4|webm|mov|m4v)$/i.test(path) ? "video" : "image",
       path,
     }));
+  const entries = [...remoteEntries, ...localEntries].sort((left, right) =>
+    left.path.localeCompare(right.path, undefined, { numeric: true })
+  );
 
   const coverEntry =
     entries.find(({ path }) => /\/cover\.(png|jpe?g|webp|avif|mp4|webm|mov|m4v)$/i.test(path)) || entries[0] || null;
@@ -218,7 +241,8 @@ const CONTENT_OUTPUT_ASSETS = getMixedMediaAssets(
     ...contentOutputLegacyModules,
     ...contentOutputImageModules,
     ...contentOutputVideoModules,
-  }
+  },
+  CONTENT_OUTPUT_REMOTE_MEDIA
 );
 
 const contentOutputBackgroundModules = import.meta.glob(
@@ -232,6 +256,7 @@ const contentOutputBackgroundModules = import.meta.glob(
 const CONTENT_OUTPUT_FOLDERS = [
   "assets/content-output/images/",
   "assets/content-output/videos/",
+  "src/content-output-remote.js",
 ];
 const CONTENT_OUTPUT_BACKGROUND = Object.values(contentOutputBackgroundModules)[0] || "";
 const CONTENT_DETAIL_HASH = "#content-detail";
@@ -1250,15 +1275,14 @@ function ContentDetailPage({ media, title, onClose }) {
   const [isLiked, setIsLiked] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [isSeeking, setIsSeeking] = useState(false);
 
   useEffect(() => {
     const originalHtmlOverflow = document.documentElement.style.overflow;
     const originalBodyOverflow = document.body.style.overflow;
-    const originalBodyTouchAction = document.body.style.touchAction;
 
     document.documentElement.style.overflow = "hidden";
     document.body.style.overflow = "hidden";
-    document.body.style.touchAction = "none";
 
     const handleKeydown = (event) => {
       if (event.key === "Escape") {
@@ -1270,7 +1294,6 @@ function ContentDetailPage({ media, title, onClose }) {
     return () => {
       document.documentElement.style.overflow = originalHtmlOverflow;
       document.body.style.overflow = originalBodyOverflow;
-      document.body.style.touchAction = originalBodyTouchAction;
       window.removeEventListener("keydown", handleKeydown);
     };
   }, [onClose]);
@@ -1281,6 +1304,7 @@ function ContentDetailPage({ media, title, onClose }) {
     setIsFullscreen(false);
     setCurrentTime(0);
     setDuration(0);
+    setIsSeeking(false);
   }, [media]);
 
   useEffect(() => {
@@ -1335,7 +1359,7 @@ function ContentDetailPage({ media, title, onClose }) {
   };
 
   const handleTimeUpdate = () => {
-    if (!videoRef.current) {
+    if (!videoRef.current || isSeeking) {
       return;
     }
 
@@ -1350,7 +1374,7 @@ function ContentDetailPage({ media, title, onClose }) {
     setDuration(videoRef.current.duration || 0);
   };
 
-  const handleSeek = (event) => {
+  const handleSeekInput = (event) => {
     if (!videoRef.current) {
       return;
     }
@@ -1358,6 +1382,18 @@ function ContentDetailPage({ media, title, onClose }) {
     const nextTime = Number(event.target.value);
     videoRef.current.currentTime = nextTime;
     setCurrentTime(nextTime);
+  };
+
+  const handleSeekStart = () => {
+    setIsSeeking(true);
+  };
+
+  const handleSeekEnd = () => {
+    setIsSeeking(false);
+    if (!videoRef.current) {
+      return;
+    }
+    setCurrentTime(videoRef.current.currentTime);
   };
 
   const progressValue = duration > 0 ? (currentTime / duration) * 100 : 0;
@@ -1433,12 +1469,18 @@ function ContentDetailPage({ media, title, onClose }) {
                   className="content-detail-progress"
                   type="range"
                   min="0"
-                  max={duration || 0}
+                  max={duration || 0.1}
                   step="0.1"
                   value={currentTime}
-                  onChange={handleSeek}
+                  onInput={handleSeekInput}
+                  onChange={handleSeekInput}
+                  onPointerDown={handleSeekStart}
+                  onPointerUp={handleSeekEnd}
+                  onPointerCancel={handleSeekEnd}
+                  onBlur={handleSeekEnd}
                   aria-label="Seek"
                   style={progressStyle}
+                  disabled={duration <= 0}
                 />
                 <div className="content-detail-player-row">
                   <div className="content-detail-player-main-controls">
@@ -2203,6 +2245,51 @@ export default function App() {
 
     return () => {
       window.removeEventListener("hashchange", syncDetailPathFromHash);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const initialHash = window.location.hash;
+    if (initialHash.startsWith(CONTENT_DETAIL_HASH)) {
+      return;
+    }
+
+    if ("scrollRestoration" in window.history) {
+      window.history.scrollRestoration = "manual";
+    }
+
+    const targetHash = "#home";
+    const resetToHero = () => {
+      if (window.location.hash !== targetHash) {
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${targetHash}`);
+      }
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    };
+
+    resetToHero();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(resetToHero);
+    });
+  }, []);
+
+  useEffect(() => {
+    const handlePageShow = () => {
+      if (window.location.hash.startsWith(CONTENT_DETAIL_HASH)) {
+        return;
+      }
+
+      if (window.location.hash !== "#home") {
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#home`);
+      }
+
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    };
+
+    window.addEventListener("pageshow", handlePageShow);
+    return () => {
+      window.removeEventListener("pageshow", handlePageShow);
     };
   }, []);
 
